@@ -1,0 +1,470 @@
+/*
+ * GccApplication1.c
+ *
+ * Created: 11/4/2019 10:07:25 AM
+ * Author : Joel Ryan, Sudarshan Pillai, Justin Boamah
+ */ 
+
+// All Defined Stuff
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+//LCD SIGNALS
+#define LCD_ADDRESS 0x4E
+#define LCD_DISABLE 0X04
+#define LCD_ENABLE 0x00
+#define LCD_WRITE 0x00
+#define LCD_READ 0x01
+#define LCD_RS 0x01
+#define LCD_BL 0x08
+
+//LCD COMMANDS
+#define CLEAR_DISPLAY 0x01
+#define CURSOR_HOME 0x02
+#define SET_ADDRESS 0x80
+
+#define TWCR_START 0xA4
+#define TWCR_STOP 0x94
+#define TWCR_SEND 0X84
+
+// Variable Declaration
+unsigned char analog0;
+unsigned char analog1;
+unsigned char analog2;
+unsigned char interrupt_count;
+unsigned char right;
+unsigned char left;
+unsigned char front;
+unsigned char threshold_left;
+unsigned char threshold_right;
+unsigned char threshold_front;
+unsigned char analog_index;
+unsigned char line01;
+unsigned char line02;
+unsigned char line03;
+unsigned char line04;
+unsigned char current_mode;
+unsigned char soil_moisture;
+unsigned char moisture_threshold;
+unsigned char wait_for_water; // 0: not waiting for water, 1: waiting for water
+unsigned char read_count;
+unsigned char test_mode; //0: not testing 1:testing
+
+void TWI(unsigned char address, unsigned char data)
+{
+	TWCR = TWCR_START; //send start condition
+	while(!(TWCR & (1<<TWINT))){} //wait for start condition to transmit
+
+	TWDR = address; //send address to get device attention
+	TWCR = TWCR_SEND; //Set TWINT to send address
+	while(!(TWCR & (1<<TWINT))){} //wait for address to go out
+	TWDR = data;//send data to address
+	TWCR = TWCR_SEND; //Set TWINT to send address
+	while(!(TWCR & (1<<TWINT))){} //wait for data byte to transmit
+	TWCR = TWCR_STOP;//finish transaction
+}
+
+void LCD_Command(unsigned char command)
+{
+	TWI(LCD_ADDRESS,(command &0xF0)|LCD_DISABLE|LCD_WRITE|LCD_BL); //Setup command high-nibble, with E high
+	TWI(LCD_ADDRESS,(command &0xF0)|LCD_ENABLE|LCD_WRITE|LCD_BL); //Pull E low
+	TWI(LCD_ADDRESS,((command<<4) & 0xF0)|LCD_DISABLE|LCD_WRITE|LCD_BL);  //Setup command low-nibble, with E high
+	TWI(LCD_ADDRESS,((command<<4) & 0xF0)|LCD_ENABLE|LCD_WRITE|LCD_BL); //Pull E low
+}
+
+void LCD_Display(unsigned char data)
+{
+	//Setup character data, with E high
+	TWI(LCD_ADDRESS,(data & 0xF0)|LCD_DISABLE|LCD_WRITE|LCD_BL|LCD_RS);
+	//Pull E low
+	TWI(LCD_ADDRESS,(data & 0xF0)|LCD_ENABLE|LCD_WRITE|LCD_BL|LCD_RS);
+	//Setup character data low nibble, with E high
+	TWI(LCD_ADDRESS,((data<<4) & 0xF0)|LCD_DISABLE|LCD_WRITE|LCD_BL|LCD_RS);
+	//Pull E low
+	TWI(LCD_ADDRESS,((data<<4) & 0xF0)|LCD_ENABLE|LCD_WRITE|LCD_BL|LCD_RS);
+}
+
+void delay(unsigned char count)
+{
+	unsigned char threshold = TCNT2+count; //Calculate the value to count to
+	while(TCNT2!=threshold)//wait and count
+	{}
+}
+
+
+void Motor_Speed(unsigned char left, unsigned char right)
+{
+	OCR0A = right - 10;
+	OCR0B = left + 10;
+}
+
+
+
+void Line_Follow(unsigned char line01, unsigned char line02, unsigned char line03, unsigned char line04)
+{
+	analog_index = 0;
+	ADMUX = (0<<REFS1)|(1<<REFS0)|(1<<ADLAR)|(0<<MUX3)|(0<<MUX2)|(0<<MUX1)|(0<<MUX0);
+	ADCSRA |= (1<<ADSC); //Start Conversion
+	if ((analog0 > 75) | (analog2 > 75)){
+		PORTD = (0<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(0<<PORTD7);
+		current_mode = 2;
+	}else{
+		current_mode = 1;
+		PORTD = (1<<PORTD0)|(0<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+		if(line01 == 0 && line02 == 0 && line03 == 0 && line04 == 0){ // If robot not on line, do auto follow
+		
+		}else if(line01 == 0 && line02 == 1 && line03 == 1 && line04 == 0){ //0110 MOVE FORWARD
+			Motor_Speed(85, 85);
+		}else if(line01 == 1 && line02 == 1 && line03 == 0 && line04 == 0){ //1100 STEER LEFT
+			Motor_Speed(30, 100);
+		}else if(line01 == 0 && line02 == 0 && line03 == 1 && line04 == 1){ //0011 STEER RIGHT
+			Motor_Speed(100, 30);
+		}else if(line01 == 1 && line02 == 0 && line03 == 0 && line04 == 0){ //1000 STEER LEFT HARDER
+			Motor_Speed(30, 110);
+		}else if(line01 == 0 && line02 == 0 && line03 == 0 && line04 == 1){ //0001 STEER RIGHT HARDER
+			Motor_Speed(110, 30);
+		}else if(line01 == 0 && line02 == 1 && line03 == 0 && line04 == 0){ //0100 GO STRAIGHT
+		Motor_Speed(85, 85);
+		}else if(line01 == 0 && line02 == 0 && line03 == 1 && line04 == 0){ //0010 GO STRAIGHT
+		Motor_Speed(85, 85);
+		}else if(line01 == 1 && line02 == 1 && line03 == 1 && line04 == 0){ //1110 LEFT TURN
+		Motor_Speed(0, 150);
+		}else if(line01 == 0 && line02 == 1 && line03 == 1 && line04 == 1){ //0111 RIGHT TURN
+		Motor_Speed(150, 11);
+		}else if(line01 == 1 && line02 == 1 && line03 == 1 && line04 == 1){ //1111 RIGHT TURN
+		Motor_Speed(85, 85);
+		}else{
+			//analog_index = 0;
+			//ADCSRA |= (1<<ADSC); //Start Conversion
+		}
+	}
+}
+
+void Auto_Navigate(unsigned char left, unsigned char front, unsigned char right)
+{
+		if (left > threshold_left && right > threshold_right){
+			PORTD = (0<<PORTD0)|(1<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+			Motor_Speed(100,100);
+			//delay(10)
+		}else if (front > threshold_front){
+			PORTD = (0<<PORTD0)|(1<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+			Motor_Speed(100,100);
+			delay(10);
+		}else{
+			PORTD = (1<<PORTD0)|(0<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+			if (left > threshold_left){
+				Motor_Speed(80, 11);
+			}else if(right > threshold_right){
+				Motor_Speed(0, 85);
+			}else{
+			OCR0A = 60;
+			OCR0B = 60;
+		}
+	}
+}
+
+void Read_Soil(){
+	OCR2A = 40;
+	ADMUX = (0<<REFS1)|(1<<REFS0)|(1<<ADLAR)|(0<<MUX3)|(0<<MUX2)|(1<<MUX1)|(1<<MUX0);
+	analog_index = 4;
+	ADCSRA |= (1<<ADSC); //Start Conversion
+	soil_moisture = ADCH;
+	//if((soil_moisture < moisture_threshold) | (wait_for_water == 0)){
+	if(((soil_moisture < moisture_threshold) | (wait_for_water == 0)) & (read_count > 25)){
+		OCR2A = 20;
+		current_mode = 5;
+		PORTC = PORTC&!(1<<PORTC1);
+	}else{
+		wait_for_water = 1;
+		PORTC = PORTC|(1<<PORTC1);
+	}
+	// Override the wait for watter
+	if(!(PINB & (1<<PINB5))){
+		wait_for_water = 0;
+	}
+}
+
+
+void Obstacle_Detect(){
+	PORTD = PORTD|(1<<PORTD4);
+}
+
+void Find_Next(){
+	if ((line01 + line02 + line03 + line04) > 2){	
+		PORTD = (0<<PORTD0)|(1<<PORTD1)|(0<<PORTD2)|(1<<PORTD7);
+		Motor_Speed(60, 90);
+	}else{
+		if(line04 != 1){ // Pivot until on another line is found
+			PORTD = (1<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(1<<PORTD7);
+			Motor_Speed(60, 80);
+		}else{ // Go back to line follow
+			current_mode = 1;
+		}
+	}
+}
+int main(void)
+{
+	sei();
+	interrupt_count = 0;
+	threshold_left = 50;
+	threshold_right = 45;
+	threshold_front = 70;
+	analog_index = 0;
+	analog0 = 0;
+	analog1 = 0;
+	analog2 = 0;
+	soil_moisture = 254;
+	moisture_threshold = 150;
+	wait_for_water = 1;
+	
+	// Enable Interrupt 1
+	EICRA = (0<<ISC11)|(1<<ISC10); //Configure interrupt for any logic change
+	EIMSK = (1<<INT1); //Enable INT0
+
+	//*************************************************
+	//Timer 1 Initialization for interrupt
+	//*************************************************
+	TCCR1A = (0<<COM1A1)|(0<<COM1A0)|(0<<WGM11)|(0<<WGM10);
+	TCCR1B = (0<<WGM13)|(1<<WGM12)|(1<<CS12)|(0<<CS11)|(1<<CS10); //Define Clock Source Prescale and set to CTC on OCR1A
+	TIMSK1 = (1<<OCIE1A)|(0<<TOIE1);//Enable Interrupt for Output Compare A Match
+	OCR1A = 750; // Focr1a = 16Mhx / (1024(1+OCR1A))
+	//*************************************************
+	//Timer 0 Initialization for PWM
+	//*************************************************
+	TCCR0A = (1<<COM0A1)|(0<<COM0A0)|(1<<COM0B1)|(0<<COM0B0)|(1<<WGM01)|(1<<WGM00);
+	TCCR0B = (0<<WGM02)|(1<<CS02 )|(0<<CS01 )|(0<<CS00 );
+	OCR0B = 50;
+	OCR0A = 50; // sets the frequency
+	DDRD = (1<<PORTD0)|(1<<PORTD1)|(1<<PORTD2)|(0<<PORTD3)|(1<<PORTD4)|(1<<PORTD5)|(1<<PORTD6)|(1<<PORTD7);
+	PORTD |= (1<<PORTD0)|(0<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+	//
+	//Run an initial analog conversion
+	ADMUX = (0<<REFS1)|(1<<REFS0)|(1<<ADLAR)|(0<<MUX3)|(0<<MUX2)|(0<<MUX1)|(0<<MUX0);
+	ADCSRA = (1<<ADEN)|(1<<ADIE)|(1<<ADPS2)|(1<<ADPS1)|(0<<ADPS0);//Enable A/D, Enable Interrupt, Set A/D
+	DIDR0 = (1<<ADC0D); //Disable Input Buffers
+	DIDR0 = (1<<ADC1D); //Disable Input Buffers
+	ADCSRA |= (1<<ADSC); //Start Conversion
+	
+	//*************************************************
+	//Timer 2 Initialization
+	//*************************************************
+	//TCCR2A = (0<<COM2A1)|(0<<COM2A0)|(0<<COM2B1)|(0<<COM2B0)|(0<<WGM21)|(0<<WGM20);
+	//TCCR2B = (0<<FOC2A)|(0<<FOC2B)|(0<<WGM22)|(1<<CS22)|(1<<CS21)|(1<<CS20);
+	TCCR2A = (1<<COM2A1)|(0<<COM2A0)|(0<<COM2B1)|(0<<COM2B0)|(1<<WGM21)|(1<<WGM20);
+	TCCR2B = (0<<FOC2A)|(0<<FOC2B)|(0<<WGM22)|(1<<CS22)|(1<<CS21)|(1<<CS20);
+	OCR2A = 20;
+	//*******************************************************
+	//Initialize TWI
+	//*******************************************************
+	DDRC = (1<<PORTC1)|(1<<PORTC4)|(1<<PORTC5); //Set SCL and SDA as outputs
+	TWBR = 0x30; //Setup prescaler
+	TWCR |= (1<<TWEN); //Enable TWI
+	
+	//********************************************************
+	//Initialize LCD
+	//********************************************************
+	delay(250); //Wait for at least 15ms (15ms/64us = 234.3750)
+	TWI(LCD_ADDRESS,0x30|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 8 bits long)
+	TWI(LCD_ADDRESS,0x30|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	delay(65);//Wait for 4.1ms (4.1ms/64us = 64.0625)
+	TWI(LCD_ADDRESS,0x30|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 8 bits long)
+	TWI(LCD_ADDRESS,0x30|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	delay(2);//Wait for 100us (100us/64us = 1.5625) T
+	TWI(LCD_ADDRESS,0x30|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 8 bits long)
+	TWI(LCD_ADDRESS,0x30|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	delay(65);//Wait for 4.1ms (4.1ms/64us = 64.0625)
+	TWI(LCD_ADDRESS,0x20|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 4 bits long)
+	TWI(LCD_ADDRESS,0x20|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	
+	//Setup for 2 lines
+	TWI(LCD_ADDRESS,0x20|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 4 bits long)
+	TWI(LCD_ADDRESS,0x20|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	TWI(LCD_ADDRESS,0x80|LCD_DISABLE|LCD_WRITE|LCD_BL); //Function set (Interface is 2 lines)
+	TWI(LCD_ADDRESS,0x80|LCD_ENABLE|LCD_WRITE|LCD_BL);
+	LCD_Command(0x0C); //Display no cursor
+	LCD_Command(0x06); //Automatic Increment
+	LCD_Command(CLEAR_DISPLAY);
+	OCR0A = 0;
+	OCR0B = 0;
+	current_mode = 1;
+	DDRB = (0<<PORTB0)|(0<<PORTB1)|(0<<PORTB2)|(1<<PORTB3)|(0<<PORTB4)|(0<<PORTB5);
+	test_mode = 1;
+    while (1) 
+    {
+		LCD_Command(CURSOR_HOME);
+		delay(50);
+		LCD_Display('M');
+		LCD_Display('O');
+		LCD_Display('D');
+		LCD_Display('E');
+		LCD_Display(':');
+		LCD_Display(0x30|current_mode);
+		LCD_Command(SET_ADDRESS|40);
+		if(test_mode == 0){
+			LCD_Display(0x30|line01);
+			LCD_Display(0x30|line02);
+			LCD_Display(0x30|line03);
+			LCD_Display(0x30|line04);
+			LCD_Display(' ');
+			LCD_Display(0x30|(soil_moisture/100));
+			LCD_Display(0x30|(soil_moisture%100/10));
+			LCD_Display(0x30|(soil_moisture%10));
+		}else if(current_mode == 1){
+			LCD_Display('L');
+			LCD_Display('I');
+			LCD_Display('N');
+			LCD_Display('E');
+			LCD_Display(' ');
+			LCD_Display('F');
+			LCD_Display('O');
+			LCD_Display('L');
+			LCD_Display('L');
+			LCD_Display('O');
+			LCD_Display('W');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+		}else if(current_mode == 2){
+			LCD_Display('O');
+			LCD_Display('B');
+			LCD_Display('S');
+			LCD_Display('T');
+			LCD_Display('A');
+			LCD_Display('C');
+			LCD_Display('L');
+			LCD_Display('E');
+			LCD_Display(' ');
+			LCD_Display('C');
+			LCD_Display('L');
+			LCD_Display('O');
+			LCD_Display('S');
+			LCD_Display('E');
+			LCD_Display(' ');
+			LCD_Display(' ');
+		}else if(current_mode == 4){
+			LCD_Display('O');
+			LCD_Display('B');
+			LCD_Display('S');
+			LCD_Display('T');
+			LCD_Display('A');
+			LCD_Display('C');
+			LCD_Display('L');
+			LCD_Display('E');
+			LCD_Display(' ');
+			LCD_Display('H');
+			LCD_Display('I');
+			LCD_Display('T');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+		}else if(current_mode == 3){
+			LCD_Display('+');
+			LCD_Display('H');
+			LCD_Display('2');
+			LCD_Display('0');
+			LCD_Display(' ');
+			LCD_Display('I');
+			LCD_Display('F');
+			LCD_Display(' ');
+			LCD_Display(0x30|(soil_moisture/100));
+			LCD_Display(0x30|(soil_moisture%100/10));
+			LCD_Display(0x30|(soil_moisture%10));
+			LCD_Display('>');
+			LCD_Display(0x30|(moisture_threshold/100));
+			LCD_Display(0x30|(moisture_threshold%100/10));
+			LCD_Display(0x30|(moisture_threshold%10));
+			LCD_Display(' ');
+		}else if(current_mode == 5){
+			LCD_Display('F');
+			LCD_Display('I');
+			LCD_Display('N');
+			LCD_Display('D');
+			LCD_Display('I');
+			LCD_Display('N');
+			LCD_Display('G');
+			LCD_Display(' ');
+			LCD_Display('N');
+			LCD_Display('E');
+			LCD_Display('X');
+			LCD_Display('T');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+			LCD_Display(' ');
+		}
+	}
+}
+
+
+// current_mode - MODE 1: Line Follow, MODE 2: Auto Navigate, MODE 3: Measure Soil MODE 4: In line obstacle
+ISR (TIMER1_COMPA_vect)
+{
+	line01 = (PINB & (1<<PINB0));
+	line02 = (PINB & (1<<PINB1))/2;
+	line03 = (PINB & (1<<PINB2))/4;
+	line04 = (PINB & (1<<PINB4))/16;
+	if((current_mode == 1) | (current_mode == 2)){
+		PORTD = PORTD&!(1<<PORTD4);
+		Line_Follow(line01, line02, line03, line04);
+		OCR2A = 20;
+	}else if(current_mode == 2){
+	}else if(current_mode == 3){
+		PORTD = (0<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(0<<PORTD7);
+		PORTD = PORTD&!(1<<PORTD4);
+		Read_Soil();
+	}else if(current_mode == 4){
+		PORTD = (0<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(0<<PORTD7);
+		Obstacle_Detect();
+		
+	}else if(current_mode == 5){
+		PORTD = PORTD&!(1<<PORTD4);
+		Find_Next();
+	}
+}
+
+ISR(ADC_vect){
+	if (analog_index == 0){
+		analog0 = ADCH;
+		analog_index = 2;
+		ADMUX = (0<<REFS1)|(1<<REFS0)|(1<<ADLAR)|(0<<MUX3)|(0<<MUX2)|(1<<MUX1)|(0<<MUX0);
+		ADCSRA |= (1<<ADSC); //Start Conversion
+	}else if(analog_index == 2){
+		analog_index = 3;
+		analog2 = ADCH;
+		ADMUX = (0<<REFS1)|(1<<REFS0)|(1<<ADLAR)|(0<<MUX3)|(0<<MUX2)|(0<<MUX1)|(0<<MUX0);
+	}else if(analog_index == 4){ //Auto_Navigate(analog0, analog1, analog2);
+		read_count = read_count + 1;
+	}
+}
+
+
+ISR(INT1_vect){
+	if(current_mode == 5){
+		current_mode = 5;
+	}else if (!(PIND & (1<<PIND3))){
+		if (line01 == 1 && line02 == 1 && line03 == 1 && line04 == 1){
+			read_count = 0;
+			current_mode = 3; // Soil Measure
+			PORTD = (0<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(0<<PORTD7);
+			PORTD = PORTD&!(1<<PORTD4);
+		}else{
+			current_mode = 4; // In line obstacle
+			PORTD = (0<<PORTD0)|(0<<PORTD1)|(0<<PORTD2)|(0<<PORTD7);
+			PORTD = PORTD&!(1<<PORTD4);
+		}
+	}else if (current_mode != 3){
+		current_mode = 1;
+		PORTD = (1<<PORTD0)|(0<<PORTD1)|(1<<PORTD2)|(0<<PORTD7);
+		PORTD = PORTD&!(1<<PORTD4);
+		
+	}
+
+}
+
+
+
+
+
